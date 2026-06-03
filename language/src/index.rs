@@ -168,6 +168,7 @@ impl<I> IdRange<I> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct IndexPool<I: Idx, V> {
     items: IndexVec<I, V>,
     pool: Vec<I>,
