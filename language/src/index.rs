@@ -194,6 +194,9 @@ impl<I: Idx, V> IndexPool<I, V> {
     pub fn len(&self) -> usize {
         self.items.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
     pub fn next_idx(&self) -> I {
         self.items.next_idx()
     }
@@ -211,9 +214,22 @@ impl<I: Idx, V> IndexPool<I, V> {
         }
     }
 
+    pub fn alloc_raw_range(&mut self, values: impl IntoIterator<Item = V>) -> RawRange<I> {
+        let start = self.next_idx();
+        for value in values {
+            self.alloc(value);
+        }
+        let end = self.next_idx();
+        (start..end).into()
+    }
+
     pub fn range(&self, r: IdRange<I>) -> &[I] {
         let s = r.start as usize;
         &self.pool[s..s + r.len as usize]
+    }
+
+    pub fn raw_range(&self, r: RawRange<I>) -> &[V] {
+        &self.items[r]
     }
 }
 
