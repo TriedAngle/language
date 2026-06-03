@@ -1,0 +1,3 @@
+[workspace]
+members = ["language"]
+resolver = "3"
