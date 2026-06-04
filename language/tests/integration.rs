@@ -1,5 +1,6 @@
 use language::lexer::Lexer;
-use language::{LexErrorKind, TokenKind};
+use language::parser::Parser;
+use language::{BindingKind, Expr, LexErrorKind, Stmt, TokenKind, TypeExpr};
 
 fn lex_kinds(src: &str) -> Vec<TokenKind> {
     let mut lexer = Lexer::new(src);
@@ -160,8 +161,23 @@ fn lexes_number_tokens() {
             TokenKind::Number,
             TokenKind::Number,
             TokenKind::Number,
+            TokenKind::Dot,
             TokenKind::Number,
             TokenKind::Number,
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn lexes_trailing_dot_number_as_number_then_dot() {
+    assert_eq!(
+        lex_kinds("1. .{"),
+        vec![
+            TokenKind::Number,
+            TokenKind::Dot,
+            TokenKind::Dot,
+            TokenKind::LBrace,
             TokenKind::Eof,
         ]
     );
@@ -264,4 +280,342 @@ fn asi_treats_newlines_in_comments_as_line_breaks() {
             TokenKind::Eof,
         ]
     );
+}
+
+#[test]
+fn parser_handles_nested_let_block_sample() {
+    let src = r#"let x = {
+        let val1 = 20*(2+3*3)
+            val1
+        }
+        let res = x+2 * 3
+    "#;
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 2);
+
+    let x_value = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected first let statement, got {stmt:?}"),
+    };
+
+    let body = match *parser.ast.expr(x_value) {
+        Expr::Body { stmts } => stmts,
+        expr => panic!("expected block body, got {expr:?}"),
+    };
+    let body_stmts = parser.ast.stmt_ids(body);
+
+    assert_eq!(body_stmts.len(), 2);
+    assert!(matches!(*parser.ast.stmt(body_stmts[0]), Stmt::Let { .. }));
+    assert!(matches!(
+        *parser.ast.stmt(body_stmts[1]),
+        Stmt::Expression(_)
+    ));
+
+    let res_value = match *parser.ast.stmt(stmts[1]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected second let statement, got {stmt:?}"),
+    };
+    assert!(matches!(
+        *parser.ast.expr(res_value),
+        Expr::Binary {
+            op: _,
+            lhs: _,
+            rhs: _
+        }
+    ));
+}
+
+#[test]
+fn parser_handles_positional_and_named_call_args() {
+    let src = "let a = f(1, x + 2)\nlet b = f(left = 1, right = 2)";
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 2);
+
+    let first_value = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected first let statement, got {stmt:?}"),
+    };
+    let first_args = match *parser.ast.expr(first_value) {
+        Expr::Call { args, .. } => parser.ast.expr_ids(args),
+        expr => panic!("expected first call, got {expr:?}"),
+    };
+    assert_eq!(first_args.len(), 2);
+
+    let second_value = match *parser.ast.stmt(stmts[1]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected second let statement, got {stmt:?}"),
+    };
+    let second_args = match *parser.ast.expr(second_value) {
+        Expr::Call { args, .. } => parser.ast.expr_ids(args),
+        expr => panic!("expected second call, got {expr:?}"),
+    };
+
+    assert_eq!(second_args.len(), 2);
+    assert!(matches!(
+        *parser.ast.expr(second_args[0]),
+        Expr::Assign {
+            target: _,
+            value: _
+        }
+    ));
+    assert!(matches!(
+        *parser.ast.expr(second_args[1]),
+        Expr::Assign {
+            target: _,
+            value: _
+        }
+    ));
+}
+
+#[test]
+fn parser_handles_function_expression() {
+    let src = "let f = fn[T: Type, U](x: Int, y = 2, z: Int = 3,) -> Int { x + y + z }";
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 1);
+
+    let value = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected let statement, got {stmt:?}"),
+    };
+
+    let params = match *parser.ast.expr(value) {
+        Expr::Function {
+            generics,
+            parameters,
+            ret,
+            ..
+        } => {
+            assert_eq!(parser.ast.generic_params(generics).len(), 2);
+            assert!(ret.is_some());
+            parser.ast.params(parameters)
+        }
+        expr => panic!("expected function expression, got {expr:?}"),
+    };
+
+    assert_eq!(params.len(), 3);
+    assert!(matches!(params[0].kind, BindingKind::Type(_)));
+    assert!(matches!(params[1].kind, BindingKind::Value(_)));
+    assert!(matches!(params[2].kind, BindingKind::Full { .. }));
+}
+
+#[test]
+fn parser_handles_named_function_statement() {
+    let src = "fn hello[T: Type, U](x: Int, y = 2, z: Int = 3,) -> Int { x + y + z }";
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 1);
+
+    let params = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Function {
+            generics,
+            parameters,
+            ret,
+            body,
+            ..
+        } => {
+            assert_eq!(parser.ast.generic_params(generics).len(), 2);
+            assert!(ret.is_some());
+            assert!(body.is_some());
+            parser.ast.params(parameters)
+        }
+        stmt => panic!("expected function statement, got {stmt:?}"),
+    };
+
+    assert_eq!(params.len(), 3);
+    assert!(matches!(params[0].kind, BindingKind::Type(_)));
+    assert!(matches!(params[1].kind, BindingKind::Value(_)));
+    assert!(matches!(params[2].kind, BindingKind::Full { .. }));
+}
+
+#[test]
+fn parser_handles_name_only_bindings() {
+    let src = "let x\nfn id(x) { x }\nstruct Names { value }";
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 3);
+
+    assert!(matches!(
+        *parser.ast.stmt(stmts[0]),
+        Stmt::Let {
+            kind: BindingKind::Name,
+            ..
+        }
+    ));
+
+    let params = match *parser.ast.stmt(stmts[1]) {
+        Stmt::Function { parameters, .. } => parser.ast.params(parameters),
+        stmt => panic!("expected function statement, got {stmt:?}"),
+    };
+    assert_eq!(params.len(), 1);
+    assert!(matches!(params[0].kind, BindingKind::Name));
+
+    let fields = match *parser.ast.stmt(stmts[2]) {
+        Stmt::Struct { fields, .. } => parser.ast.fields(fields),
+        stmt => panic!("expected struct statement, got {stmt:?}"),
+    };
+    assert_eq!(fields.len(), 1);
+    assert!(matches!(fields[0].kind, BindingKind::Name));
+}
+
+#[test]
+fn parser_handles_generic_struct_with_nested_anonymous_struct_type() {
+    let src = r#"struct Test[T: Type] {
+  table: struct {
+    hello: fn(i32) -> i32,
+    value: i32
+  }
+}"#;
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 1);
+
+    let fields = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Struct {
+            generics, fields, ..
+        } => {
+            assert_eq!(parser.ast.generic_params(generics).len(), 1);
+            parser.ast.fields(fields)
+        }
+        stmt => panic!("expected struct statement, got {stmt:?}"),
+    };
+
+    assert_eq!(fields.len(), 1);
+    let table_ty = match fields[0].kind {
+        BindingKind::Type(ty) => ty,
+        kind => panic!("expected typed table field, got {kind:?}"),
+    };
+
+    let nested_fields = match *parser.ast.type_expr(table_ty) {
+        TypeExpr::Record { fields, .. } => parser.ast.fields(fields),
+        expr => panic!("expected anonymous struct type, got {expr:?}"),
+    };
+
+    assert_eq!(nested_fields.len(), 2);
+
+    let hello_ty = match nested_fields[0].kind {
+        BindingKind::Type(ty) => ty,
+        kind => panic!("expected typed hello field, got {kind:?}"),
+    };
+
+    match *parser.ast.type_expr(hello_ty) {
+        TypeExpr::Fn { params, ret, .. } => {
+            assert_eq!(parser.ast.params(params).len(), 1);
+            assert!(ret.is_some());
+        }
+        expr => panic!("expected fn type, got {expr:?}"),
+    }
+
+    assert!(matches!(nested_fields[1].kind, BindingKind::Type(_)));
+}
+
+#[test]
+fn parser_handles_anonymous_record_expression() {
+    let src = r#"let value = .{
+  table: .{ hello: f, value: 1 },
+  count: 2,
+}"#;
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 1);
+
+    let value = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected let statement, got {stmt:?}"),
+    };
+
+    let fields = match *parser.ast.expr(value) {
+        Expr::Record { fields } => parser.ast.fields(fields),
+        expr => panic!("expected anonymous record expression, got {expr:?}"),
+    };
+
+    assert_eq!(fields.len(), 2);
+
+    let nested = match fields[0].kind {
+        BindingKind::Value(value) => value,
+        kind => panic!("expected record field value, got {kind:?}"),
+    };
+
+    let nested_fields = match *parser.ast.expr(nested) {
+        Expr::Record { fields } => parser.ast.fields(fields),
+        expr => panic!("expected nested anonymous record expression, got {expr:?}"),
+    };
+
+    assert_eq!(nested_fields.len(), 2);
+    assert!(matches!(fields[1].kind, BindingKind::Value(_)));
+}
+
+#[test]
+fn parser_handles_anonymous_record_shorthand_fields() {
+    let src = "let value = .{ hello, count: 2 }";
+
+    let mut parser = Parser::new(src);
+    let stmts = parser.parse_program();
+
+    assert!(parser.errors.is_empty(), "{:?}", parser.errors);
+    assert_eq!(stmts.len(), 1);
+
+    let value = match *parser.ast.stmt(stmts[0]) {
+        Stmt::Let {
+            kind: BindingKind::Value(value),
+            ..
+        } => value,
+        stmt => panic!("expected let statement, got {stmt:?}"),
+    };
+
+    let fields = match *parser.ast.expr(value) {
+        Expr::Record { fields } => parser.ast.fields(fields),
+        expr => panic!("expected anonymous record expression, got {expr:?}"),
+    };
+
+    assert_eq!(fields.len(), 2);
+
+    let shorthand_value = match fields[0].kind {
+        BindingKind::Value(value) => value,
+        kind => panic!("expected shorthand field value, got {kind:?}"),
+    };
+
+    assert!(matches!(*parser.ast.expr(shorthand_value), Expr::Ident(_)));
+    assert!(matches!(fields[1].kind, BindingKind::Value(_)));
 }

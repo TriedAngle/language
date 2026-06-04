@@ -13,6 +13,7 @@ make_index!(TypeExprId);
 make_index!(MatchArmId);
 make_index!(FieldId);
 make_index!(ParamId);
+make_index!(GenericParamId);
 make_index!(VariantId);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -27,6 +28,7 @@ pub struct Span {
 #[derive(Debug, Clone, Copy)]
 pub enum Expr {
     Literal(Literal),
+    Ident(Symbol),
     Unary {
         op: UnOp,
         rhs: ExprId,
@@ -72,7 +74,11 @@ pub enum Expr {
     Body {
         stmts: IdRange<StmtId>,
     },
+    Record {
+        fields: RawRange<FieldId>,
+    },
     Function {
+        generics: RawRange<GenericParamId>,
         parameters: RawRange<ParamId>,
         ret: Option<TypeExprId>,
         body: ExprId,
@@ -85,16 +91,18 @@ pub enum Stmt {
     Expression(ExprId),
     Let {
         pattern: PatternId,
-        kind: LetKind,
+        kind: BindingKind,
     },
     Function {
         name: Symbol,
+        generics: RawRange<GenericParamId>,
         parameters: RawRange<ParamId>,
         ret: Option<TypeExprId>,
         body: Option<ExprId>,
     },
     Struct {
         name: Symbol,
+        generics: RawRange<GenericParamId>,
         fields: RawRange<FieldId>,
     },
     Enum {
@@ -115,11 +123,13 @@ pub enum TypeExpr {
     },
     Record {
         name: Option<Symbol>,
-        fields: IdRange<FieldId>,
+        generics: RawRange<GenericParamId>,
+        fields: RawRange<FieldId>,
     },
     Fn {
-        params: IdRange<TypeExprId>,
-        ret: IdRange<TypeExprId>,
+        generics: RawRange<GenericParamId>,
+        params: RawRange<ParamId>,
+        ret: Option<TypeExprId>,
     },
 }
 
@@ -131,7 +141,8 @@ pub enum Pattern {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum LetKind {
+pub enum BindingKind {
+    Name,
     Type(TypeExprId),
     Value(ExprId),
     Full { ty: TypeExprId, value: ExprId },
@@ -146,7 +157,7 @@ pub enum AssignOp {
 #[rustfmt::skip]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Eq, Ne, Lt, Le, Gt, Ge,
+    Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or,
 }
 
 #[rustfmt::skip]
@@ -171,17 +182,22 @@ pub struct EnumVariant {
 #[derive(Debug, Clone, Copy)]
 pub struct Parameter {
     pub span: Span,
-    pub name: PatternId,
+    pub pattern: PatternId,
+    pub kind: BindingKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GenericParam {
+    pub span: Span,
+    pub name: Symbol,
     pub ty: Option<TypeExprId>,
-    pub default: Option<ExprId>,
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct Field {
     pub span: Span,
     pub name: Symbol,
-    pub ty: TypeExprId,
-    pub default: Option<ExprId>,
+    pub kind: BindingKind,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -226,6 +242,7 @@ pub struct Ast {
     match_arms: IndexPool<MatchArmId, MatchArm>,
     fields: IndexPool<FieldId, Field>,
     params: IndexPool<ParamId, Parameter>,
+    generic_params: IndexPool<GenericParamId, GenericParam>,
     variants: IndexPool<VariantId, EnumVariant>,
 }
 
@@ -411,6 +428,29 @@ impl Ast {
 
     pub fn params(&self, range: RawRange<ParamId>) -> &[Parameter] {
         self.params.raw_range(range)
+    }
+
+    pub fn push_generic_param(&mut self, param: GenericParam) -> GenericParamId {
+        self.generic_params.alloc(param)
+    }
+
+    pub fn push_generic_params(
+        &mut self,
+        params: impl IntoIterator<Item = GenericParam>,
+    ) -> RawRange<GenericParamId> {
+        self.generic_params.alloc_raw_range(params)
+    }
+
+    pub fn generic_param(&self, id: GenericParamId) -> &GenericParam {
+        self.generic_params.get(id)
+    }
+
+    pub fn generic_param_mut(&mut self, id: GenericParamId) -> &mut GenericParam {
+        self.generic_params.get_mut(id)
+    }
+
+    pub fn generic_params(&self, range: RawRange<GenericParamId>) -> &[GenericParam] {
+        self.generic_params.raw_range(range)
     }
 
     pub fn push_variant(&mut self, variant: EnumVariant) -> VariantId {

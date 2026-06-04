@@ -222,8 +222,7 @@ impl<'src> Lexer<'src> {
         }
 
         let next = self.src.get(self.pos + 1).copied();
-        if self.peek_byte() == Some(b'.') && next != Some(b'.') && !next.is_some_and(is_ident_start)
-        {
+        if self.peek_byte() == Some(b'.') && next.is_some_and(|b| b.is_ascii_digit()) {
             self.advance();
             self.take_number_digits();
         }
