@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crate::index::{IdRange, IndexPool, IndexVec, RawRange};
 
 pub mod index;
+pub mod lexer;
 pub mod parser;
 
 make_index!(ExprId);
@@ -187,6 +190,27 @@ pub struct MatchArm {
     pub pat: PatternId,
     pub guard: Option<ExprId>,
     pub body: ExprId,
+}
+
+#[derive(Default)]
+pub struct Interner {
+    map: HashMap<String, u32>,
+    strs: Vec<String>,
+}
+
+impl Interner {
+    pub fn intern(&mut self, s: &str) -> Symbol {
+        if let Some(&id) = self.map.get(s) {
+            return Symbol(id);
+        }
+        let id = self.strs.len() as u32;
+        self.strs.push(s.to_owned());
+        self.map.insert(s.to_owned(), id);
+        Symbol(id)
+    }
+    pub fn resolve(&self, s: Symbol) -> &str {
+        &self.strs[s.0 as usize]
+    }
 }
 
 #[derive(Debug, Default)]
@@ -413,17 +437,68 @@ impl Ast {
     }
 }
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+#[derive(Debug, Clone, Copy)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    // literals / names
+    Int,
+    Str,
+    Ident,
+    Underscore,
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+    // keywords
+    KwLet,
+    KwFn,
+    KwIf,
+    KwElse,
+    KwMatch,
+    KwStruct,
+    KwReturn,
+    KwFor,
+    KwWhile,
+    KwBreak,
+    KwContinue,
+
+    // brackets / punctuation
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Colon,
+    Semi,
+    Dot,
+    Eq,
+    FatArrow,
+    Arrow,
+    Caret,
+    Union,
+
+    // operators
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Bang,
+    EqEq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    AmpAmp,
+    PipePipe,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    Eof,
 }
