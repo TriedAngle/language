@@ -444,9 +444,16 @@ pub struct Token {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LexErrorKind {
+    InvalidChar,
+    UnterminatedString,
+    UnterminatedBlockComment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     // literals / names
-    Int,
+    Number,
     Str,
     Ident,
     Underscore,
@@ -475,10 +482,12 @@ pub enum TokenKind {
     Colon,
     Semi,
     Dot,
+    DotDot,
     Eq,
     FatArrow,
     Arrow,
     Caret,
+    Question,
     Union,
 
     // operators
@@ -494,11 +503,14 @@ pub enum TokenKind {
     Le,
     Gt,
     Ge,
+    Amp,
     AmpAmp,
+    Pipe,
     PipePipe,
     PlusEq,
     MinusEq,
     StarEq,
     SlashEq,
+    Error(LexErrorKind),
     Eof,
 }

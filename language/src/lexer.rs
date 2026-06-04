@@ -1,9 +1,16 @@
-use crate::{Span, Token, TokenKind};
+use crate::{LexErrorKind, Span, Token, TokenKind};
 
 pub struct Lexer<'src> {
     src: &'src [u8],
     pos: usize,
     last: TokenKind,
+    pending: Option<Token>,
+}
+
+struct Trivia {
+    crossed_newline: bool,
+    semi_pos: usize,
+    error: Option<Token>,
 }
 
 pub struct Cursor<'src> {
@@ -35,18 +42,32 @@ impl<'src> Lexer<'src> {
             src: src.as_bytes(),
             pos: 0,
             last: TokenKind::Semi,
+            pending: None,
         }
     }
 
     pub fn next_token(&mut self) -> Token {
-        let crossed_newline = self.skip_trivia();
-        if crossed_newline && is_terminator(self.last) && !self.next_is_closer() {
+        if let Some(token) = self.pending.take() {
+            self.last = token.kind;
+            return token;
+        }
+
+        let trivia = self.skip_trivia();
+        if trivia.crossed_newline && is_terminator(self.last) && !self.next_is_closer() {
+            if let Some(error) = trivia.error {
+                self.pending = Some(error);
+            }
             self.last = TokenKind::Semi;
-            let at = self.pos as u32;
+            let at = trivia.semi_pos as u32;
             return Token {
                 kind: TokenKind::Semi,
                 span: Span { start: at, end: at },
             };
+        }
+
+        if let Some(error) = trivia.error {
+            self.last = error.kind;
+            return error;
         }
 
         let start = self.pos;
@@ -68,18 +89,18 @@ impl<'src> Lexer<'src> {
             None => return TokenKind::Eof,
         };
         match b {
-            b'0'..=b'9' => {
-                self.take_while(|c| c.is_ascii_digit());
-                TokenKind::Int
-            }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                self.take_while(|c| c.is_ascii_alphanumeric() || c == b'_');
+            b'0'..=b'9' => self.number(),
+            b if is_ident_start(b) => {
+                self.take_while(is_ident_continue);
                 keyword_or_ident(&self.src[start..self.pos])
             }
             b'"' => {
                 self.advance();
-                self.string_body();
-                TokenKind::Str
+                if self.string_body() {
+                    TokenKind::Str
+                } else {
+                    TokenKind::Error(LexErrorKind::UnterminatedString)
+                }
             }
             b'(' => self.single(TokenKind::LParen),
             b')' => self.single(TokenKind::RParen),
@@ -90,8 +111,16 @@ impl<'src> Lexer<'src> {
             b',' => self.single(TokenKind::Comma),
             b':' => self.single(TokenKind::Colon),
             b';' => self.single(TokenKind::Semi),
-            b'.' => self.single(TokenKind::Dot),
+            b'.' => {
+                self.advance();
+                if self.eat_byte(b'.') {
+                    TokenKind::DotDot
+                } else {
+                    TokenKind::Dot
+                }
+            }
             b'^' => self.single(TokenKind::Caret),
+            b'?' => self.single(TokenKind::Question),
             b'%' => self.single(TokenKind::Percent),
             b'+' => {
                 self.advance();
@@ -163,22 +192,54 @@ impl<'src> Lexer<'src> {
             }
             b'&' => {
                 self.advance();
-                self.eat_byte(b'&');
-                TokenKind::AmpAmp
+                if self.eat_byte(b'&') {
+                    TokenKind::AmpAmp
+                } else {
+                    TokenKind::Amp
+                }
             }
             b'|' => {
                 self.advance();
-                self.eat_byte(b'|');
-                TokenKind::PipePipe
+                if self.eat_byte(b'|') {
+                    TokenKind::PipePipe
+                } else {
+                    TokenKind::Pipe
+                }
             }
             _ => {
                 self.advance();
-                TokenKind::Eof
+                TokenKind::Error(LexErrorKind::InvalidChar)
             }
         }
     }
 
-    fn skip_trivia(&mut self) -> bool {
+    fn number(&mut self) -> TokenKind {
+        self.take_number_digits();
+
+        if self.eat_byte(b'r') {
+            self.take_radix_digits();
+            return TokenKind::Number;
+        }
+
+        let next = self.src.get(self.pos + 1).copied();
+        if self.peek_byte() == Some(b'.') && next != Some(b'.') && !next.is_some_and(is_ident_start)
+        {
+            self.advance();
+            self.take_number_digits();
+        }
+
+        if matches!(self.peek_byte(), Some(b'e') | Some(b'E')) {
+            self.advance();
+            if matches!(self.peek_byte(), Some(b'+') | Some(b'-')) {
+                self.advance();
+            }
+            self.take_number_digits();
+        }
+
+        TokenKind::Number
+    }
+
+    fn skip_trivia(&mut self) -> Trivia {
         let mut newline = false;
         loop {
             match self.peek_byte() {
@@ -196,24 +257,29 @@ impl<'src> Lexer<'src> {
                     }
                 }
                 Some(b'/') if self.src.get(self.pos + 1) == Some(&b'*') => {
-                    self.pos += 2;
-                    while self.pos < self.src.len() {
-                        if self.peek_byte() == Some(b'*')
-                            && self.src.get(self.pos + 1) == Some(&b'/')
-                        {
-                            self.pos += 2;
-                            break;
-                        }
-                        if self.peek_byte() == Some(b'\n') {
-                            newline = true;
-                        }
-                        self.pos += 1;
+                    let start = self.pos;
+                    if !self.block_comment(&mut newline) {
+                        return Trivia {
+                            crossed_newline: newline,
+                            semi_pos: start,
+                            error: Some(Token {
+                                kind: TokenKind::Error(LexErrorKind::UnterminatedBlockComment),
+                                span: Span {
+                                    start: start as u32,
+                                    end: self.pos as u32,
+                                },
+                            }),
+                        };
                     }
                 }
                 _ => break,
             }
         }
-        newline
+        Trivia {
+            crossed_newline: newline,
+            semi_pos: self.pos,
+            error: None,
+        }
     }
 
     fn peek_byte(&self) -> Option<u8> {
@@ -243,15 +309,53 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn string_body(&mut self) {
+    fn take_number_digits(&mut self) {
+        self.take_while(|b| b.is_ascii_digit() || b == b'_');
+    }
+
+    fn take_radix_digits(&mut self) {
+        self.take_while(|b| b.is_ascii_alphanumeric() || b == b'_');
+    }
+
+    fn block_comment(&mut self, newline: &mut bool) -> bool {
+        self.pos += 2;
+        let mut depth = 1;
+        while let Some(b) = self.peek_byte() {
+            if b == b'/' && self.src.get(self.pos + 1) == Some(&b'*') {
+                self.pos += 2;
+                depth += 1;
+                continue;
+            }
+            if b == b'*' && self.src.get(self.pos + 1) == Some(&b'/') {
+                self.pos += 2;
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+                continue;
+            }
+            if b == b'\n' {
+                *newline = true;
+            }
+            self.pos += 1;
+        }
+        false
+    }
+
+    fn string_body(&mut self) -> bool {
         while let Some(b) = self.peek_byte() {
             self.pos += 1;
             match b {
-                b'\\' => self.pos += 1,
-                b'"' => break,
+                b'\\' => {
+                    if self.pos < self.src.len() {
+                        self.pos += 1;
+                    }
+                }
+                b'"' => return true,
                 _ => {}
             }
         }
+        false
     }
 
     fn single(&mut self, k: TokenKind) -> TokenKind {
@@ -268,8 +372,30 @@ fn is_terminator(k: TokenKind) -> bool {
     use TokenKind::*;
     matches!(
         k,
-        Int | Str | Ident | RParen | RBracket | RBrace | KwReturn | KwBreak | KwContinue
+        Number
+            | Str
+            | Ident
+            | Underscore
+            | RParen
+            | RBracket
+            | RBrace
+            | KwReturn
+            | KwBreak
+            | KwContinue
     )
+}
+
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || is_non_ascii(b)
+}
+
+fn is_ident_continue(b: u8) -> bool {
+    let __ = 10;
+    b.is_ascii_alphanumeric() || b == b'_' || is_non_ascii(b)
+}
+
+fn is_non_ascii(b: u8) -> bool {
+    b >= 0x80
 }
 
 fn keyword_or_ident(s: &[u8]) -> TokenKind {
@@ -286,6 +412,7 @@ fn keyword_or_ident(s: &[u8]) -> TokenKind {
         b"for" => KwFor,
         b"break" => KwBreak,
         b"continue" => KwContinue,
+        b"_" => Underscore,
         b"v" => Union, // union type operator (this steals `v` as an identifier)
         _ => Ident,
     }
